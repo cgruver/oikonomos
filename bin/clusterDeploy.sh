@@ -100,17 +100,17 @@ function appendDisconnectedInstallConfig() {
       source_2="quay.io/openshift/okd-content"
     fi
 
-  NEXUS_CERT=$( openssl s_client -showcerts -connect ${PROXY_REGISTRY} </dev/null 2>/dev/null|openssl x509 -outform PEM | while read line ; do echo "  ${line}" ; done )
+  NEXUS_CERT=$( openssl s_client -showcerts -connect ${LOCAL_REGISTRY} </dev/null 2>/dev/null|openssl x509 -outform PEM | while read line ; do echo "  ${line}" ; done )
 
 cat << EOF >> ${WORK_DIR}/install-config-upi.yaml
 additionalTrustBundle: |
 ${NEXUS_CERT}
 imageDigestSources:
 - mirrors:
-  - ${PROXY_REGISTRY}/openshift
+  - ${LOCAL_REGISTRY}/openshift
   source: ${source_1}
 - mirrors:
-  - ${PROXY_REGISTRY}/openshift
+  - ${LOCAL_REGISTRY}/openshift
   source: ${source_2}
 EOF
 }

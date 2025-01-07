@@ -219,8 +219,8 @@ function createPullSecret() {
   else
     echo "{\"fake\": {\"auth\": \"Zm9vOmJhcgo=\"}" | yq -p=json > ${PULL_SECRET}.yaml
   fi
-  echo -n "{\"nexus.${LAB_DOMAIN}:5000\": {\"auth\": \"${NEXUS_SECRET}\"}}" | yq -p=json >> ${PULL_SECRET}.yaml
-  echo -n "{\"auths\": $(cat ${PULL_SECRET}.yaml | yq -o=json)}" > ${PULL_SECRET}
+  echo -n "{\"${LOCAL_REGISTRY}\": {\"auth\": \"${NEXUS_SECRET}\"}}" | yq -p=json >> ${PULL_SECRET}.yaml
+  echo -n "{\"auths\": $(cat ${PULL_SECRET}.yaml | yq -o=json | jq -c)}" > ${PULL_SECRET}
   # cat ${PULL_SECRET}.yaml | yq -o=json > ${PULL_SECRET}
   NEXUS_PWD=""
   NEXUS_PWD_CHK=""
@@ -447,7 +447,7 @@ data:
 EOF
 }
 
-function mirrorOkdRelease() {
+function mirrorOcpRelease() {
   rm -rf ${OPENSHIFT_LAB_PATH}/lab-config/work-dir
   mkdir -p ${OPENSHIFT_LAB_PATH}/lab-config/work-dir
   mkdir -p ${OPENSHIFT_LAB_PATH}/lab-config/release-sigs
@@ -777,7 +777,7 @@ function initCephVars() {
 
 function postInstall() {
 
-  ${OC} patch imagepruners.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"schedule":"0 0 * * *","suspend":false,"keepTagRevisions":3,"keepYoungerThan":60,"resources":{},"affinity":{},"nodeSelector":{},"tolerations":[],"startingDeadlineSeconds":60,"successfulJobsHistoryLimit":3,"failedJobsHistoryLimit":3}}'
+  ${OC} patch imagepruners.imageregistry.operator.openshift.io/cluster --type merge -p '{"spec":{"schedule":"0 0 * * *","suspend":false,"keepTagRevisions":3,"keepYoungerThan":60,"resources":{},"affinity":{},"nodeSelector":{},"tolerations":[],"successfulJobsHistoryLimit":3,"failedJobsHistoryLimit":3}}'
   ${OC} delete pod --field-selector=status.phase==Succeeded --all-namespaces
   ${OC} delete pod --field-selector=status.phase==Failed --all-namespaces
   if [[ $(yq e ".cluster.release-type" ${CLUSTER_CONFIG}) != "ocp" ]]
@@ -983,7 +983,9 @@ spec:
       enable: true
     pluginRegistry:
       openVSXURL: https://open-vsx.org
-  containerRegistry: {}      
+    devfileRegistry:
+      disableInternalRegistry: true   
+  containerRegistry: {}   
   devEnvironments:       
     startTimeoutSeconds: 300
     secondsOfRunBeforeIdling: -1
@@ -1096,6 +1098,9 @@ function qnap() {
       -s)
         createIscsiStorageClass
       ;;
+      -r)
+        createRegistryPvc ${QNAP_BACKEND}
+      ;;
     esac
   done
 }
@@ -1104,7 +1109,7 @@ function deployIscsiOperator() {
 
   export QNAP_WORK_DIR=${OPENSHIFT_LAB_PATH}/${CLUSTER_NAME}.${DOMAIN}/qnap-work-dir
   rm -rf ${QNAP_WORK_DIR}
-  git clone https://github.com/qnap-dev/QNAP-CSI-PlugIn.git ${QNAP_WORK_DIR}
+  git clone -b ${QNAP_VERSION} https://github.com/qnap-dev/QNAP-CSI-PlugIn.git ${QNAP_WORK_DIR}
   ${OC} apply -f ${QNAP_WORK_DIR}/Deploy/Trident/namespace.yaml 
   ${OC} apply -f ${QNAP_WORK_DIR}/Deploy/crds/tridentorchestrator_crd.yaml 
   ${OC} apply -f ${QNAP_WORK_DIR}/Deploy/Trident/bundle.yaml 
@@ -1115,13 +1120,8 @@ function createIscsiStorageClass() {
 
 ${OC} wait --for=condition=Available -n trident --timeout=300s --all deployments
 
-QNAP_BACKEND=""
   ISCSI_PWD="red"
   ISCSI_PWD_CHK="green"
-  echo "Enter the name for your QNAP Backend:"
-  read QNAP_BACKEND
-  echo "Enter the IP Address of your QNAP Backend:"
-  read ISCSI_IP
   echo "Enter the user id for your QNAP Backend:"
   read ISCSI_USER
   while [[ ${ISCSI_PWD} != ${ISCSI_PWD_CHK} ]]
@@ -1171,6 +1171,8 @@ apiVersion: storage.k8s.io/v1
 kind: StorageClass 
 metadata: 
   name: ${QNAP_BACKEND} 
+  annotations:
+    storageclass.kubernetes.io/is-default-class: 'true'
 provisioner: csi.trident.qnap.io
 parameters: 
   selector: "storage=${QNAP_BACKEND}"
@@ -1178,6 +1180,57 @@ parameters:
 allowVolumeExpansion: true
 volumeBindingMode: WaitForFirstConsumer
 EOF
+}
+
+function createRegistryPvc() {
+
+local STORAGE_CLASS=${1}
+
+cat << EOF | ${OC} apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-pvc
+  namespace: openshift-image-registry
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: ${STORAGE_CLASS}
+EOF
+
+  ${OC} patch configs.imageregistry.operator.openshift.io cluster --type merge --patch '{"spec":{"rolloutStrategy":"Recreate","managementState":"Managed","storage":{"pvc":{"claim":"registry-pvc"}}}}'
+}
+
+function keyCloak() {
+
+  KEYCLOAK_REALM=$(yq e ".cluster.keycloak-realm" ${CLUSTER_CONFIG})
+
+  KEYCLOAK_CLIENT_SECRET="red"
+  KEYCLOAK_CLIENT_SECRET_CHK="green"
+  while [[ ${KEYCLOAK_CLIENT_SECRET} != ${KEYCLOAK_CLIENT_SECRET_CHK} ]]
+  do
+    echo "Enter the Clent Secret for the Keycloak Client:"
+    read -s KEYCLOAK_CLIENT_SECRET
+    echo "Re-Enter the Clent Secret for the Keycloak Client:"
+    read -s KEYCLOAK_CLIENT_SECRET_CHK
+    if [[ ${KEYCLOAK_CLIENT_SECRET} != ${KEYCLOAK_CLIENT_SECRET_CHK} ]]
+    then
+      echo "Clent Secrets do not match. Try Again."
+    fi
+  done
+
+  ${OC} create -n openshift-config secret generic keycloak-client-secret --from-literal=clientSecret=${KEYCLOAK_CLIENT_SECRET} -o yaml --dry-run='client' | ${OC} apply -f -
+
+  openssl s_client -showcerts -connect keycloak.${LAB_DOMAIN}:7443 </dev/null 2>/dev/null|openssl x509 -outform PEM > /tmp/ca.crt
+  ${OC} create -n openshift-config configmap keycloak-ca --from-file=ca.crt=/tmp/ca.crt -o yaml --dry-run='client' | ${OC} apply -f -
+
+  ${OC} patch oauth cluster --type merge --patch "{\"spec\":{\"identityProviders\":[{\"mappingMethod\":\"claim\",\"name\":\"keycloak\",\"openID\":{\"ca\":{\"name\":\"keycloak-ca\"},\"claims\":{\"email\":[\"email\"],\"groups\":[\"groups\"],\"name\":[\"name\"],\"preferredUsername\":[\"preferred_username\"]},\"clientID\":\"ocp-${CLUSTER_NAME}\",\"clientSecret\":{\"name\":\"keycloak-client-secret\"},\"extraScopes\":[],\"issuer\":\"https://keycloak.${LAB_DOMAIN}:7443/realms/${KEYCLOAK_REALM}\"},\"type\":\"OpenID\"}]}}"
+  ${OC} patch console cluster --type merge --patch "{\"spec\":{\"authentication\":{\"logoutRedirect\":\"https://keycloak.${LAB_DOMAIN}:7443/realms/${KEYCLOAK_REALM}/protocol/openid-connect/logout?post_logout_redirect_uri=https://console-openshift-console.apps.${CLUSTER_NAME}.${LAB_DOMAIN}&client_id=ocp-${CLUSTER_NAME}\"}}}"
+  ${OC} adm policy add-cluster-role-to-group cluster-admin lab-admin
+
 }
 
 # function deployGitOps() {

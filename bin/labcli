@@ -105,7 +105,7 @@ do
       resetDns
     ;;
     --mirror)
-      mirrorOkdRelease
+      mirrorOcpRelease
     ;;
     --kube)
       setKubeConfig
@@ -143,6 +143,9 @@ do
     ;;
     --qnap)
       qnap "$@"
+    ;;
+    --keycloak)
+      keyCloak
     ;;
     *)
       #  echo "unknown option ${i}"

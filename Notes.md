@@ -182,6 +182,61 @@ chown -R nexus:nexus /usr/local/nexus
 keytool -genkeypair -keystore /usr/local/nexus/nexus-3/etc/ssl/keystore.jks -deststoretype pkcs12 -storepass password -keypass password -alias jetty -keyalg RSA -keysize 4096 -validity 5000 -dname "CN=nexus.clg.lab, OU=clg-lab, O=clg-lab, L=City, ST=State, C=US" -ext "SAN=DNS:nexus.clg.lab,IP:10.11.12.20" -ext "BC=ca:true"
 
 cat /usr/local/nexus/sonatype-work/nexus3/admin.password
+
+firewall-cmd --add-port=5000/tcp --permanent
+firewall-cmd --add-port=5001/tcp --permanent
+firewall-cmd --add-port=5002/tcp --permanent
+firewall-cmd --add-port=8443/tcp --permanent
+firewall-cmd --reload
+```
+
+## Install KeyCloak on Dev Tools Host
+
+```bash
+KEYCLOAK_VER=$(basename $(curl -Ls -o /dev/null -w %{url_effective} https://github.com/keycloak/keycloak/releases/latest))
+
+mkdir -p /usr/local/keycloak
+cd /usr/local/keycloak
+wget -O keycloak-${KEYCLOAK_VER}.zip https://github.com/keycloak/keycloak/releases/download/${KEYCLOAK_VER}/keycloak-${KEYCLOAK_VER}.zip
+unzip keycloak-${KEYCLOAK_VER}.zip
+ln -s keycloak-${KEYCLOAK_VER} keycloak-server
+keytool -genkeypair -keystore /usr/local/keycloak/keystore.jks -deststoretype pkcs12 -storepass password -keypass password -alias jetty -keyalg RSA -keysize 4096 -validity 5000 -dname "CN=keycloak.${LAB_DOMAIN}, OU=openshift4-lab, O=openshift4-lab, L=City, ST=State, C=US" -ext "SAN=DNS:keycloak.${LAB_DOMAIN},IP:10.11.12.20" -ext "BC=ca:true"
+mv /usr/local/keycloak/keycloak-server/conf/keycloak.conf /usr/local/keycloak/keycloak-server/conf/keycloak.conf.orig
+mkdir -p /usr/local/keycloak/home
+groupadd keycloak
+useradd -g keycloak -d /usr/local/keycloak/home keycloak
+
+cat << EOF > /usr/local/keycloak/keycloak-server/conf/keycloak.conf
+hostname=keycloak.${LAB_DOMAIN}
+http-enabled=false
+https-key-store-file=/usr/local/keycloak/keystore.jks
+https-port=7443
+bootstrap-admin-username=keycloak
+bootstrap-admin-password=keycloak
+EOF
+
+firewall-cmd --add-port=7443/tcp --permanent
+firewall-cmd --reload
+
+cat << EOF > /etc/systemd/system/keycloak.service
+[Unit]
+Description=keycloak service
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=65536
+ExecStart=/usr/local/keycloak/keycloak-server/bin/kc.sh start
+ExecStop=kill $(ps -x | grep keycloak | grep java | cut -d" " -f2)
+User=keycloak
+Restart=on-abort
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable keycloak.service
+systemctl start keycloak.service
 ```
 
 ## Trust Nexus in OCP
@@ -209,7 +264,7 @@ oc patch proxy cluster --type=merge --patch '{"spec":{"trustedCA":{"name":"lab-c
 ```
 
 ```bash
-NEXUS_CERT=$(openssl s_client -showcerts -connect nexus.${LAB_DOMAIN}:8443 </dev/null 2>/dev/null|openssl x509 -outform PEM | base64)
+NEXUS_CERT=$(openssl s_client -showcerts -connect nexus.${LAB_DOMAIN}:8443 </dev/null 2>/dev/null|openssl x509 -outform PEM | base64 -w 0)
 ```
 
 ```bash
@@ -223,14 +278,9 @@ metadata:
 spec:
   config:
     ignition:
-      version: 3.2.0
+      version: 3.4.0
     storage:
       files:
-      - contents:
-          source: data:text/plain;charset=utf-8;base64,${GITEA_CERT}
-        filesystem: root
-        mode: 0644
-        path: /etc/pki/ca-trust/source/anchors/gitea-ca.crt
       - contents:
           source: data:text/plain;charset=utf-8;base64,${NEXUS_CERT}
         filesystem: root
@@ -250,18 +300,19 @@ metadata:
 spec:
   config:
     ignition:
-      version: 3.2.0
+      version: 3.4.0
     storage:
       files:
-      - contents:
-          source: data:text/plain;charset=utf-8;base64,${GITEA_CERT}
-        filesystem: root
-        mode: 0644
-        path: /etc/pki/ca-trust/source/anchors/gitea-ca.crt
       - contents:
           source: data:text/plain;charset=utf-8;base64,${NEXUS_CERT}
         filesystem: root
         mode: 0644
         path: /etc/pki/ca-trust/source/anchors/nexus-ca.crt
 EOF
+```
+
+## Fix etcd speed for SATA
+
+```bash
+oc patch etcd/cluster --type=merge -p '{"spec": {"controlPlaneHardwareSpeed": "Slower"}}'
 ```

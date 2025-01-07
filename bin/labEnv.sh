@@ -247,6 +247,12 @@ function setClusterEnv() {
       export BOOTSTRAP_KVM_DOMAIN=${DOMAIN}
     fi
   fi
+  if [[ $(yq ".cluster | has(\"qnap\")" ${CLUSTER_CONFIG}) == "true" ]]
+  then
+    export QNAP_VERSION=$(yq e ".cluster.qnap.version" ${CLUSTER_CONFIG})
+    export QNAP_BACKEND=$(yq e ".cluster.qnap.backend" ${CLUSTER_CONFIG})
+    export ISCSI_IP=$(yq e ".cluster.qnap.ip-addr" ${CLUSTER_CONFIG})
+  fi
 }
 
 function setEdgeEnv() {
